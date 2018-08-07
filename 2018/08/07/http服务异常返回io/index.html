@@ -1,0 +1,65 @@
+<!DOCTYPE html><html><head><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" name="viewport"><meta content="yes" name="apple-mobile-web-app-capable"><meta content="black-translucent" name="apple-mobile-web-app-status-bar-style"><meta content="telephone=no" name="format-detection"><meta name="description"><title>http服务异常返回io | 技术人生</title><link rel="stylesheet" type="text/css" href="/css/style.css?v=0.0.0"><link rel="stylesheet" type="text/css" href="//cdn.bootcss.com/normalize/8.0.0/normalize.min.css"><link rel="stylesheet" type="text/css" href="//cdn.bootcss.com/pure/1.0.0/pure-min.css"><link rel="stylesheet" type="text/css" href="//cdn.bootcss.com/pure/1.0.0/grids-responsive-min.css"><link rel="stylesheet" href="//cdn.bootcss.com/font-awesome/4.7.0/css/font-awesome.min.css"><script type="text/javascript" src="//cdn.bootcss.com/jquery/3.3.1/jquery.min.js"></script><link rel="Shortcut Icon" type="image/x-icon" href="/favicon.ico"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="apple-touch-icon-precomposed" href="/apple-touch-icon.png"></head><body><div class="body_container"><div id="header"><div class="site-name"><h1 class="hidden">http服务异常返回io</h1><a id="logo" href="/.">技术人生</a><p class="description">fizzleg的博客</p></div><div id="nav-menu"><a class="current" href="/."><i class="fa fa-home"> 首页</i></a><a href="/archives/"><i class="fa fa-archive"> 归档</i></a><a href="/about/"><i class="fa fa-user"> 关于</i></a><a href="/atom.xml"><i class="fa fa-rss"> 订阅</i></a></div></div><div class="pure-g" id="layout"><div class="pure-u-1 pure-u-md-3-4"><div class="content_container"><div class="post"><h1 class="post-title">http服务异常返回io</h1><div class="post-meta">Aug 7, 2018</div><div class="post-content"><p>记一下线上调用spring-boot微服务出现 curl: (18) transfer closed with outstanding read data remaining</p>
+<h2 id="环境："><a href="#环境：" class="headerlink" title="环境："></a>环境：</h2><ul>
+<li>http 1.1</li>
+<li>spring-boot-starter-web 2.0.2.RELEASE</li>
+<li>spring-boot-starter-jetty 2.0.2.RELEASE（jetty 9.4.10）</li>
+</ul>
+<h2 id="问题描述："><a href="#问题描述：" class="headerlink" title="问题描述："></a>问题描述：</h2><ul>
+<li>只有这一个进程的这一个接口出现这个问题</li>
+<li>使用http1.1版本访问 时会出现上述问题</li>
+</ul>
+<h2 id="问题排查过程"><a href="#问题排查过程" class="headerlink" title="问题排查过程"></a>问题排查过程</h2><ul>
+<li>第一步当然是google一下 transfer closed with outstanding read data remaining 这个异常由于什么原因导致的<br>可以参考 <a href="https://blog.csdn.net/delphiwcdj/article/details/51095945" target="_blank" rel="noopener">https://blog.csdn.net/delphiwcdj/article/details/51095945</a> 这篇文章<br>由上可以知道在http1.1版本默认使用 Connection: keep-alive</li>
+<li>结合前面我们知道在http1.1默认是长连接，一次请求以 0\r\n\r\n 为结束标志</li>
+<li>我们可以使用tcpdump抓包看一下这次http请求的过程，发现请求是由服务端主动关闭了连接，并且每次返回的数据和正常返回的数据比缺少 0\r\n\r\n</li>
+<li>通过上面我们现在有一个临时解决的方案：<ul>
+<li>将http版本改为1.0，不适用长连接的方式</li>
+<li>或者在请求头中加上 “Connection:close” 的方式来修改默认的长连接方式</li>
+</ul>
+</li>
+<li>然后我们接着往下查：<ul>
+<li>只有一个进程出现问题说明这个具有偶发性</li>
+<li>只有一个接口出现问题说明应该和uri有关</li>
+<li>我们把请求参数去掉发现还是有问题，这时候根本没有进入业务处理，和其他的url都一样直接返回了，这时候只能在本地debug跟踪一下处理流程了，看看哪块和uri有关</li>
+</ul>
+</li>
+<li><p>我们再本地debug一下，可以发现还没进入业务处理的逻辑，在业务处理之外发现了有两个过滤器，并且这两个过滤器和uri相关<br>其中一个过滤器的代码如下：</p>
+<figure class="highlight gradle"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">protected</span> <span class="keyword">void</span> doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain) <span class="keyword">throws</span> ServletException, IOException &#123;</span><br><span class="line">    String uri = request.getRequestURI();</span><br><span class="line">    timeInMillis.putIfAbsent(uri, <span class="keyword">new</span> CircularFifoQueue&lt;<span class="keyword">Long</span>&gt;(MAX_LENGTH_RESPONSE_TIME_QUEUE));</span><br><span class="line">    Queue&lt;<span class="keyword">Long</span>&gt; <span class="keyword">times</span> = timeInMillis.get(uri);</span><br><span class="line">    <span class="keyword">Long</span> beginTime = System.currentTimeMillis();</span><br><span class="line">    filterChain.doFilter(request, response);</span><br><span class="line">    <span class="keyword">Long</span> endTime = System.currentTimeMillis();</span><br><span class="line">    <span class="keyword">times</span>.add(endTime - beginTime);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+<p>其中我们发现有一个循环队列 CircularFifoQueue，点进去发现不是线程安全的</p>
+</li>
+<li><p>同时还有一个点，当时线上这个进程的内存占用比其他进程明显要高，并且访问统计的url（/status/dashboard）会直接抛出一个内存溢出的异常</p>
+</li>
+<li>这时候我们需要查看线上内存的具体情况，为了避免影响线上业务，我们需要先将当前进程的流量切掉（最好找运维操作）</li>
+<li>迁移完流量后，我们可以用jmap -histo {pid} 查看当时java堆中具体是哪些对象占用内存较多</li>
+<li><p>这时候发现有一个占用较多的 ConcurrentHashMap.Node，可能和我们的问题相关了</p>
+</li>
+<li><p>我们在本地模拟一下内存溢出看看是否会导致刚刚那个问题，修改一下过滤器的代码：</p>
+<figure class="highlight gradle"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">protected</span> <span class="keyword">void</span> doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain) <span class="keyword">throws</span> ServletException, IOException &#123;</span><br><span class="line">      String uri = request.getRequestURI();</span><br><span class="line">      timeInMillis.putIfAbsent(uri, <span class="keyword">new</span> CircularFifoQueue&lt;<span class="keyword">Long</span>&gt;(MAX_LENGTH_RESPONSE_TIME_QUEUE));</span><br><span class="line">      Queue&lt;<span class="keyword">Long</span>&gt; <span class="keyword">times</span> = timeInMillis.get(uri);</span><br><span class="line">      <span class="keyword">Long</span> beginTime = System.currentTimeMillis();</span><br><span class="line">      filterChain.doFilter(request, response);</span><br><span class="line">      <span class="keyword">Long</span> endTime = System.currentTimeMillis();</span><br><span class="line">      <span class="keyword">times</span>.add(endTime - beginTime);</span><br><span class="line">      <span class="keyword">throw</span> <span class="keyword">new</span> OutOfMemoryError();</span><br><span class="line">  &#125;</span><br></pre></td></tr></table></figure>
+<p>直接在最后抛出一个内存溢出的错误，这时候我们可以看到客户端的表现就会出现 curl: (18) transfer closed with outstanding read data remaining 了。</p>
+</li>
+<li>到这里就基本可以确定是由于非现场安全的队列在某些并发场景下导致了内存溢出导致的。</li>
+</ul>
+<h3 id="最终解决方案"><a href="#最终解决方案" class="headerlink" title="最终解决方案"></a>最终解决方案</h3><ul>
+<li>将循环队列替换为我们自己实现的数组，然后用AtomicLong实现一个数组的游标去设置值</li>
+</ul>
+<h3 id="扩展，深入springmvc的调用链查看一下具体情况"><a href="#扩展，深入springmvc的调用链查看一下具体情况" class="headerlink" title="扩展，深入springmvc的调用链查看一下具体情况"></a>扩展，深入springmvc的调用链查看一下具体情况</h3><ul>
+<li>我们本地debug的时候跟一下jetty的调用链</li>
+<li><p>在jtty中分发请求的HttpChannel这个类，我们一直可以跟踪到这个方法</p>
+<figure class="highlight sqf"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br></pre></td><td class="code"><pre><span class="line"><span class="built_in">private</span> void minimalErrorResponse(Throwable failure)</span><br><span class="line">  &#123;</span><br><span class="line">      <span class="keyword">try</span></span><br><span class="line">      &#123;</span><br><span class="line">          Integer code=(Integer)<span class="variable">_request</span>.getAttribute(RequestDispatcher.ERROR_STATUS_CODE);</span><br><span class="line">          <span class="variable">_response</span>.reset(<span class="literal">true</span>);</span><br><span class="line">          <span class="variable">_response</span>.setStatus(code == null ? <span class="number">500</span> : code);</span><br><span class="line">          <span class="variable">_response</span>.flushBuffer();</span><br><span class="line">      &#125;</span><br><span class="line">      <span class="keyword">catch</span> (Throwable x)</span><br><span class="line">      &#123;</span><br><span class="line">          failure.addSuppressed(x);</span><br><span class="line">          abort(failure);</span><br><span class="line">      &#125;</span><br><span class="line">  &#125;</span><br></pre></td></tr></table></figure>
+<p>我们可以看到在请求出现异常时jetty会将response重置，并修改状态码，那为什么我们还能收到正常的返回值，并且状态码是200呢？</p>
+</li>
+<li>跟踪到response的reset方法里面，我们会发现最终会调用到 HttpChannel的resetBuffer 方法中判断了当前channel的状态是否为commonited状态，如果commonited为true的话，直接抛出了异常，然后在后面讲jetty对应的channel关闭了。</li>
+<li>接下来我们看看channel的commonited状态什么时候置位true的，我们重新debug跟踪可以发现在springmvc 处理response返回值时的 AbstractMessageConverterMethodProcessor.writeWithMessageConverters 这个方法中调用了channel的write方法，这个时候将commonited设置为true的</li>
+<li>综上我们可以发现springmvc和jetty结合的处理流程存在一定的问题，springmvc处理业务返回值时已经将数据写入了jetty的channel，并且将commonited设置为true了，后续拦截器的处理只要出现异常都会导致这种数据正常返回，连接异常关闭的情况。</li>
+</ul>
+<h3 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h3><ul>
+<li>上线新的技术框架还是必须要到线上测试充分才推广，不然会有想不到的坑</li>
+<li>业务中要充分考虑并发场景</li>
+</ul>
+</div><div class="tags"><a href="/tags/curl-18-transfer-closed-with-outstanding-read-data-remaining/">curl:(18) transfer closed with outstanding read data remaining</a></div><div class="post-nav"><a class="next" href="/2018/08/02/hello-world/">Hello World</a></div></div></div></div><div class="pure-u-1-4 hidden_mid_and_down"><div id="sidebar"><div class="widget"><div class="search-form"><input id="local-search-input" placeholder="Search" type="text" name="q" results="0"/><div id="local-search-result"></div></div></div><div class="widget"><div class="widget-title"><i class="fa fa-folder-o"> Kategorien</i></div></div><div class="widget"><div class="widget-title"><i class="fa fa-star-o"> Tags</i></div><div class="tagcloud"><a href="/tags/curl-18-transfer-closed-with-outstanding-read-data-remaining/" style="font-size: 15px;">curl:(18) transfer closed with outstanding read data remaining</a></div></div><div class="widget"><div class="widget-title"><i class="fa fa-file-o"> Letzte</i></div><ul class="post-list"><li class="post-list-item"><a class="post-list-link" href="/2018/08/07/http服务异常返回io/">http服务异常返回io</a></li><li class="post-list-item"><a class="post-list-link" href="/2018/08/02/hello-world/">Hello World</a></li></ul></div><div class="widget"><div class="widget-title"><i class="fa fa-external-link"> Blogroll</i></div><ul></ul><a href="http://www.example1.com/" title="site-name1" target="_blank">site-name1</a><ul></ul><a href="http://www.example2.com/" title="site-name2" target="_blank">site-name2</a><ul></ul><a href="http://www.example3.com/" title="site-name3" target="_blank">site-name3</a></div></div></div><div class="pure-u-1 pure-u-md-3-4"><div id="footer">Copyright © 2018 <a href="/." rel="nofollow">技术人生.</a> Powered by<a rel="nofollow" target="_blank" href="https://hexo.io"> Hexo.</a><a rel="nofollow" target="_blank" href="https://github.com/tufu9441/maupassant-hexo"> Theme</a> by<a rel="nofollow" target="_blank" href="https://github.com/pagecho"> Cho.</a></div></div></div><a class="show" id="rocket" href="#top"></a><script type="text/javascript" src="/js/totop.js?v=0.0.0" async></script><script type="text/javascript" src="//cdn.bootcss.com/fancybox/3.3.5/jquery.fancybox.min.js" async></script><script type="text/javascript" src="/js/fancybox.js?v=0.0.0" async></script><link rel="stylesheet" type="text/css" href="//cdn.bootcss.com/fancybox/3.3.5/jquery.fancybox.min.css"><script type="text/javascript" src="/js/search.js?v=0.0.0"></script><script>var search_path = 'search.xml';
+if (search_path.length == 0) {
+   search_path = 'search.xml';
+}
+var path = '/' + search_path;
+searchFunc(path, 'local-search-input', 'local-search-result');
+</script><script type="text/javascript" src="/js/codeblock-resizer.js?v=0.0.0"></script><script type="text/javascript" src="/js/smartresize.js?v=0.0.0"></script></div></body></html>
